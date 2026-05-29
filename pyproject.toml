@@ -8,6 +8,7 @@ dependencies = [
     "bibtexparser>=1.4.4",
     "loguru>=0.7.3",
     "metapub>=0.7.4",
+    "playwright>=1.60.0",
     "typer>=0.26.3",
 ]
 

@@ -25,7 +25,7 @@ app = typer.Typer(
 
 # 配置日志
 logger.add(
-    "bibtex_enrich_{time:YYYY-MM-DD}.log",
+    "logs/bibtex_enrich_{time:YYYY-MM-DD}.log",
     rotation="1 week",
     retention="30 days",
     level="INFO",
@@ -256,7 +256,6 @@ def clean_bibtex_fields(entry: dict) -> dict:
 def enrich_bibtex_entry(
     entry_dict: dict,
     entry_key: str,
-    entry_type: str,
     searcher: PubMedLookup,
     force_update: bool = False,
     dry_run: bool = False,
@@ -416,14 +415,13 @@ def enrich(
 
         # 保存原始的ID和ENTRYTYPE
         entry_key = entry.get("ID", f"entry_{i}")
-        entry_type = entry.get("ENTRYTYPE", "article")
 
         # 丰富条目
         original_has_pmid = "pmid" in entry
         original_has_doi = "doi" in entry
 
         enriched_fields = enrich_bibtex_entry(
-            entry, entry_key, entry_type, searcher, force, dry_run
+            entry, entry_key, searcher, force, dry_run
         )
 
         # 更新统计
