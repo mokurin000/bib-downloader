@@ -7,7 +7,7 @@ Sci-Hub BibTeX Downloader
 使用方法:
     python scihub_bib_downloader.py input.bib
     python scihub_bib_downloader.py input.bib --output ./papers
-    python scihub_bib_downloader.py input.bib --update-domains
+    python scihub_bib_downloader.py input.bib --scihub-url https://sci-hub.ru
 """
 
 import sys
@@ -19,6 +19,9 @@ import typer
 import bibtexparser
 from loguru import logger
 from scidownl import scihub_download
+
+# 默认Sci-Hub域名
+DEFAULT_SCI_HUB_URL = "https://sci-hub.box"
 
 # 配置 loguru
 logger.remove()  # 移除默认处理器
@@ -114,6 +117,7 @@ def parse_bib_file(bib_path: Path) -> List[PaperEntry]:
 def download_paper(
     paper: PaperEntry,
     output_dir: Path,
+    scihub_url: str,
     proxies: Optional[dict] = None,
     timeout: int = 30,
 ) -> bool:
@@ -123,6 +127,7 @@ def download_paper(
     Args:
         paper: 论文条目
         output_dir: 输出目录
+        scihub_url: Sci-Hub网址
         proxies: 代理设置
         timeout: 下载超时时间(秒)
 
@@ -145,19 +150,24 @@ def download_paper(
     try:
         # 优先使用DOI下载（如果有），否则使用标题
         if paper.doi:
-            logger.info(f"使用DOI下载: {paper.doi}")
+            logger.info(f"使用DOI下载: {paper.doi} (Sci-Hub: {scihub_url})")
             with logger.catch(message=f"下载失败: {paper.doi}"):
                 scihub_download(
-                    paper.doi, paper_type="doi", out=str(output_path), proxies=proxies
+                    paper.doi,
+                    paper_type="doi",
+                    out=str(output_path),
+                    proxies=proxies,
+                    scihub_url=scihub_url,
                 )
         else:
-            logger.info(f"使用标题下载: {paper.title[:80]}...")
+            logger.info(f"使用标题下载: {paper.title[:80]}... (Sci-Hub: {scihub_url})")
             with logger.catch(message=f"下载失败: {paper.title[:50]}"):
                 scihub_download(
                     paper.title,
                     paper_type="title",
                     out=str(output_path),
                     proxies=proxies,
+                    scihub_url=scihub_url,
                 )
 
         if output_path.exists() and output_path.stat().st_size > 0:
@@ -173,27 +183,17 @@ def download_paper(
         return False
 
 
-def update_scihub_domains():
-    """更新Sci-Hub可用域名列表"""
-    try:
-        from scidownl import domain_update
-
-        logger.info("正在更新Sci-Hub域名列表...")
-        domain_update(mode="crawl")
-        logger.success("域名更新完成")
-    except Exception as e:
-        logger.error(f"域名更新失败: {e}")
-        logger.info("将使用已有的域名列表")
-
-
 @app.command()
 def main(
     bib_file: str = typer.Argument(..., help="BibTeX文件路径"),
     output: str = typer.Option(
         DEFAULT_OUTPUT_DIR, "--output", "-o", help="PDF文件输出目录"
     ),
-    update_domains: bool = typer.Option(
-        False, "--update-domains", "-u", help="下载前先更新Sci-Hub域名列表"
+    scihub_url: str = typer.Option(
+        DEFAULT_SCI_HUB_URL,
+        "--scihub-url",
+        "-s",
+        help=f"Sci-Hub网址 (默认: {DEFAULT_SCI_HUB_URL})",
     ),
     proxy: Optional[str] = typer.Option(
         None, "--proxy", "-p", help="代理地址，例如: http=socks5://127.0.0.1:7890"
@@ -215,8 +215,8 @@ def main(
     # 指定输出目录
     python scihub_bib_downloader.py references.bib --output ./my_papers
 
-    # 更新域名后下载
-    python scihub_bib_downloader.py references.bib --update-domains
+    # 使用自定义Sci-Hub网址
+    python scihub_bib_downloader.py references.bib --scihub-url https://sci-hub.st
 
     # 使用代理下载
     python scihub_bib_downloader.py references.bib --proxy socks5://127.0.0.1:7890
@@ -241,13 +241,10 @@ def main(
     logger.info("Sci-Hub BibTeX 论文下载器")
     logger.info(f"Bib文件: {bib_file}")
     logger.info(f"输出目录: {output}")
+    logger.info(f"Sci-Hub网址: {scihub_url}")
     logger.info(f"代理: {proxy or '未设置'}")
     logger.info(f"超时: {timeout}秒")
     logger.info("=" * 60)
-
-    # 更新域名（如果需要）
-    if update_domains:
-        update_scihub_domains()
 
     # 解析代理设置
     proxies = None
@@ -283,7 +280,7 @@ def main(
                 continue
 
             # 下载
-            if download_paper(paper, Path(output), proxies, timeout):
+            if download_paper(paper, Path(output), scihub_url, proxies, timeout):
                 success_count += 1
             else:
                 fail_count += 1
@@ -302,7 +299,7 @@ def main(
 
     if fail_count > 0:
         logger.warning("部分论文下载失败，可能原因:")
-        logger.warning("  1. Sci-Hub域名不可用，请尝试 --update-domains 更新")
+        logger.warning("  1. Sci-Hub域名不可用，请尝试更换 --scihub-url")
         logger.warning("  2. 网络连接问题，可尝试使用代理")
         logger.warning("  3. 论文在Sci-Hub上不存在")
         logger.warning("  4. 下载超时，可尝试增加 --timeout 参数")
