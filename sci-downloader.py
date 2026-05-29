@@ -94,19 +94,31 @@ def parse_bib_file(bib_path: Path) -> List[str]:
         raise typer.Exit(code=1)
 
 
-def write_aria2_input_to_stdout(downloads: List[tuple]):
-    """Write aria2 input file format to stdout with downloads/ prefix"""
-    for url, filename in downloads:
-        if url:
-            print(f"{url}")
-            print(f"  out=downloads/{filename}")
-            print(f"  referer={DEFAULT_SCI_HUB_URL}")
-            print()  # Empty line between entries
+def write_curl_script_to_file(downloads: List[tuple], pdf_dir: Path, output_file: Path):
+    """Write curl script to file (without shebang)"""
+    if not downloads:
+        logger.warning("No downloads to write")
+        return
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write("curl -L \\\n")
+
+        for i, (url, filename) in enumerate(downloads):
+            path = pdf_dir / filename
+            if i == len(downloads) - 1:  # Last line without backslash
+                f.write(f"   '{url}' -o '{path}'\n")
+            else:
+                f.write(f"   '{url}' -o '{path}' \\\n")
+
+    logger.success(f"Curl script written to: {output_file}")
 
 
 @app.command()
 def download(
     bib_file: Path = typer.Argument(..., exists=True, help="BibTeX file path"),
+    output_script: Path = typer.Option(
+        Path("download.sh"), "--output", "-o", help="Output shell script path"
+    ),
     sci_hub_url: str = typer.Option(DEFAULT_SCI_HUB_URL, help="Sci-Hub base URL"),
     skip_existing: bool = typer.Option(True, help="Skip if PDF already exists"),
     pdf_dir: Path = typer.Option(
@@ -122,13 +134,11 @@ def download(
 ):
     """
     Download PDFs from Sci-Hub using DOIs from BibTeX file.
-    Generates aria2 input file and writes to stdout with 'downloads/' prefix.
+    Generates a curl script file.
 
     Usage:
-        python script.py download references.bib | aria2c -i -
-
-    The script will automatically create the 'downloads' directory and prefix
-    all output filenames with 'downloads/'.
+        python script.py download references.bib
+        python script.py download references.bib --output my_download.sh
     """
     if verbose:
         logger.add(sys.stderr, level="DEBUG")
@@ -138,6 +148,7 @@ def download(
     logger.info(f"Starting PDF download process from {bib_file}")
     logger.info(f"Sci-Hub URL: {sci_hub_url}")
     logger.info(f"Downloads directory: {pdf_dir.absolute()}")
+    logger.info(f"Output script: {output_script.absolute()}")
     logger.info(f"Delay between requests: {delay} seconds")
     logger.info(f"Browser headless mode: {headless}")
 
@@ -175,8 +186,6 @@ def download(
 
                     logger.info(f"Processing DOI {idx + 1}/{len(dois)}: {doi}")
 
-                    # Create a new page for each DOI to keep state clean
-                    # Or reuse the same page - reusing is more efficient
                     url = await get_download_link(page, sci_hub_url, doi)
 
                     if url:
@@ -188,11 +197,10 @@ def download(
             finally:
                 await browser.close()
 
-        # Write aria2 input to stdout
+        # Write curl script to file
         if downloads:
-            write_aria2_input_to_stdout(downloads)
-            logger.success(f"Generated aria2 input for {len(downloads)} PDFs")
-            logger.info(f"PDFs will be saved to: {pdf_dir.absolute()}/")
+            write_curl_script_to_file(downloads, pdf_dir, output_script)
+            logger.info(f"To download, run: bash {output_script}")
         else:
             logger.warning("No download links found - nothing to output")
 
