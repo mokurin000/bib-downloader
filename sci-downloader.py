@@ -1,12 +1,13 @@
-import typer
+import sys
 import asyncio
-from playwright.async_api import async_playwright, Page
-import bibtexparser
-from loguru import logger
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
-import sys
+
+import typer
+from playwright.async_api import async_playwright, Page
+import bibtexparser
+from loguru import logger
 
 app = typer.Typer()
 

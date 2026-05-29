@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-BibTeX到PubMed DOI/PMID查找工具 - metapub版本
-使用metapub库简化PubMed API交互
-"""
-
 import re
 import os
 from pathlib import Path
