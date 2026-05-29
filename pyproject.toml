@@ -1,0 +1,14 @@
+[project]
+name = "paper-search"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "bibtexparser>=1.4.4",
+    "loguru>=0.7.3",
+    "scidownl>=1.0.2",
+    "typer>=0.26.3",
+]
+
+[dependency-groups]
