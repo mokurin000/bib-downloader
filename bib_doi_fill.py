@@ -6,131 +6,68 @@ BibTeX到PubMed DOI/PMID查找工具 - metapub版本
 
 import re
 import os
-import argparse
 from pathlib import Path
-from typing import Dict, List, Optional
 from dataclasses import dataclass
+from datetime import datetime
 
-# 设置NCBI API Key（可选，提高速率限制）
-# export NCBI_API_KEY="your_api_key_here"
-# 或在代码中设置: os.environ['NCBI_API_KEY'] = "your_key"
-
+import typer
+import bibtexparser
+from bibtexparser.bparser import BibTexParser
+from loguru import logger
 from metapub import PubMedFetcher
+
+# 创建CLI应用
+app = typer.Typer(
+    name="bibtex-pubmed-enricher",
+    help="从BibTeX文件中查找并添加PubMed DOI和PMID",
+    add_completion=True,
+)
+
+# 配置日志
+logger.add(
+    "bibtex_enrich_{time:YYYY-MM-DD}.log",
+    rotation="1 week",
+    retention="30 days",
+    level="INFO",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level:8} | {message}",
+)
 
 
 @dataclass
 class BibEntry:
-    """BibTeX条目数据结构"""
+    """BibTeX条目数据结构（简化版，使用bibtexparser后不再需要完整解析逻辑）"""
 
     key: str
     entry_type: str
-    fields: Dict[str, str]
-    raw_text: str = ""
-
-
-class BibTeXParser:
-    """BibTeX解析器"""
-
-    @staticmethod
-    def parse_file(filepath: Path) -> List[BibEntry]:
-        """解析BibTeX文件"""
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # 匹配BibTeX条目: @type{key, ...}
-        pattern = r"@(\w+)\{([^,]+),([^@]+?)\n\}"
-
-        entries = []
-        for match in re.finditer(pattern, content, re.DOTALL):
-            entry_type = match.group(1)
-            key = match.group(2).strip()
-            fields_text = match.group(3)
-
-            fields = BibTeXParser._parse_fields(fields_text)
-
-            entries.append(
-                BibEntry(
-                    key=key,
-                    entry_type=entry_type,
-                    fields=fields,
-                    raw_text=match.group(0),
-                )
-            )
-
-        return entries
-
-    @staticmethod
-    def _parse_fields(fields_text: str) -> Dict[str, str]:
-        """解析BibTeX字段"""
-        fields = {}
-
-        # 匹配 field = {value} 或 field = "value"
-        field_pattern = r'(\w+)\s*=\s*[{"]([^"}]+)[}"](?=\s*,|\s*$)'
-
-        for match in re.finditer(field_pattern, fields_text):
-            field_name = match.group(1).lower()
-            field_value = match.group(2).strip()
-            fields[field_name] = field_value
-
-        return fields
-
-    @staticmethod
-    def write_file(filepath: Path, entries: List[BibEntry]) -> None:
-        """将条目写回BibTeX文件"""
-        with open(filepath, "w", encoding="utf-8") as f:
-            for entry in entries:
-                f.write(f"@{entry.entry_type}{{{entry.key},\n")
-
-                # 优先显示的重要字段顺序
-                field_order = [
-                    "title",
-                    "author",
-                    "journal",
-                    "year",
-                    "volume",
-                    "number",
-                    "pages",
-                    "doi",
-                    "pmid",
-                ]
-
-                for field in field_order:
-                    if field in entry.fields:
-                        value = entry.fields[field]
-                        f.write(f"  {field} = {{{value}}},\n")
-
-                # 写入其他字段
-                for field, value in entry.fields.items():
-                    if field not in field_order:
-                        f.write(f"  {field} = {{{value}}},\n")
-
-                f.write("}\n\n")
+    fields: dict[str, str]
 
 
 class PubMedLookup:
     """使用metapub的PubMed查找类"""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None, email: str | None = None):
         """
         初始化PubMed查找器
 
         Args:
             api_key: NCBI API密钥（提高速率限制）
+            email: 联系邮箱（NCBI建议提供）
         """
         if api_key:
             os.environ["NCBI_API_KEY"] = api_key
+            logger.info(f"使用NCBI API Key (前缀: {api_key[:8]}...)")
+
+        if email:
+            os.environ["NCBI_EMAIL"] = email
+            logger.info(f"设置联系邮箱: {email}")
 
         self.fetch = PubMedFetcher()
-
-        # 用于统计查询次数
         self.query_count = 0
+        self.cache_pmid_info: dict[str, dict] = {}
 
     def _get_journal_abbrev(self, journal: str) -> str:
-        """
-        尝试将期刊名转换为NLM缩写格式
-        metapub的pmids_for_citation方法要求使用NLM标题缩写
-        """
-        # 常见期刊映射（可扩展）
+        """尝试将期刊名转换为NLM缩写格式"""
+        # 常见期刊映射
         journal_map = {
             "diabetologia": "Diabetologia",
             "nature": "Nature",
@@ -138,15 +75,23 @@ class PubMedLookup:
             "cell": "Cell",
             "new england journal of medicine": "N Engl J Med",
             "the lancet": "Lancet",
+            "lancet": "Lancet",
             "british medical journal": "BMJ",
+            "bmj": "BMJ",
             "jama": "JAMA",
             "plos one": "PLoS One",
+            "plos medicine": "PLoS Med",
             "proceedings of the national academy of sciences": "Proc Natl Acad Sci USA",
+            "pnas": "Proc Natl Acad Sci USA",
+            "nature communications": "Nat Commun",
+            "scientific reports": "Sci Rep",
+            "cell reports": "Cell Rep",
         }
 
         journal_lower = journal.lower().strip()
         for key, abbrev in journal_map.items():
             if key in journal_lower:
+                logger.debug(f"期刊映射: {journal} -> {abbrev}")
                 return abbrev
 
         return journal
@@ -156,27 +101,11 @@ class PubMedLookup:
         title: str,
         journal: str,
         year: str,
-        volume: Optional[str] = None,
-        first_page: Optional[str] = None,
-        author: Optional[str] = None,
-    ) -> Optional[str]:
-        """
-        通过文章信息搜索PMID
-
-        使用metapub的pmids_for_citation方法
-
-        Args:
-            title: 文章标题（用于验证）
-            journal: 期刊名称
-            year: 发表年份
-            volume: 卷号（可选）
-            first_page: 起始页码（可选）
-            author: 作者姓氏（可选）
-
-        Returns:
-            PMID字符串，未找到返回None
-        """
-        # 构建查询参数
+        volume: str | None = None,
+        first_page: str | None = None,
+        author: str | None = None,
+    ) -> str | None:
+        """通过文章信息搜索PMID"""
         query_params = {"jtitle": self._get_journal_abbrev(journal), "year": year}
 
         if volume:
@@ -186,53 +115,55 @@ class PubMedLookup:
         if author:
             query_params["aulast"] = author
 
-        # 使用metapub的citation查找
         try:
             pmids = self.fetch.pmids_for_citation(**query_params)
             self.query_count += 1
+            logger.debug(f"pmids_for_citation查询: {query_params} -> {pmids}")
 
             if pmids:
-                # 验证标题是否匹配
                 for pmid in pmids[:3]:
                     if self._verify_title_match(pmid, title):
+                        logger.info(f"通过citation找到PMID: {pmid}")
                         return pmid
 
-            # 如果精确查找失败，尝试使用标题搜索
+            # Fallback到标题搜索
             return self._search_by_title(title, journal, year)
 
         except Exception as e:
-            print(f"  metapub查询失败: {e}")
+            logger.warning(f"citation查询失败 {query_params}: {e}")
             return None
 
-    def _search_by_title(self, title: str, journal: str, year: str) -> Optional[str]:
-        """使用标题进行搜索（fallback方法）"""
-        # 构建查询字符串
-        # 取标题前50个字符或第一个句号之前的内容
-        short_title = re.split(r"[.:]", title)[0][:60]
+    def _search_by_title(self, title: str, journal: str, year: str) -> str | None:
+        """使用标题进行搜索"""
+        short_title = re.split(r"[.:]", title)[0][:60].strip()
         query = f'"{short_title}"[Title] AND {journal}[Journal] AND {year}[dp]'
 
         try:
             pmids = self.fetch.pmids_for_query(query, retmax=5)
             self.query_count += 1
+            logger.debug(f"标题搜索查询: {query} -> {pmids}")
 
             if pmids:
                 for pmid in pmids[:3]:
                     if self._verify_title_match(pmid, title):
+                        logger.info(f"通过标题找到PMID: {pmid}")
                         return pmid
 
-            # 更宽松的搜索：只使用标题关键词
+            # 更宽松的搜索
             keywords = " ".join(title.split()[:5])
             query = f"{keywords}[Title] AND {year}[dp]"
             pmids = self.fetch.pmids_for_query(query, retmax=5)
             self.query_count += 1
+            logger.debug(f"宽松搜索查询: {query} -> {pmids}")
 
             if pmids:
                 for pmid in pmids[:3]:
                     if self._verify_title_match(pmid, title):
+                        logger.info(f"通过宽松搜索找到PMID: {pmid}")
                         return pmid
 
         except Exception as e:
-            print(f"  标题搜索失败: {e}")
+            logger.warning(f"标题搜索失败: {e}")
 
         return None
 
@@ -243,31 +174,52 @@ class PubMedLookup:
             self.query_count += 1
 
             actual_title = article.title
-            # 清理标点符号后比较
             clean_expected = re.sub(r"[^\w\s]", "", expected_title.lower())
             clean_actual = re.sub(r"[^\w\s]", "", actual_title.lower())
 
-            # 检查标题相似度（前30个字符匹配或包含关系）
-            if (
+            # 缓存文章信息供后续使用
+            if pmid not in self.cache_pmid_info:
+                self.cache_pmid_info[pmid] = {
+                    "doi": article.doi,
+                    "title": actual_title,
+                    "journal": article.journal,
+                    "year": article.year,
+                    "volume": getattr(article, "volume", ""),
+                    "issue": getattr(article, "issue", ""),
+                    "pages": getattr(article, "pages", ""),
+                }
+
+            # 标题匹配检查
+            match = (
                 clean_actual.startswith(clean_expected[:30])
                 or clean_expected.startswith(clean_actual[:30])
                 or clean_expected in clean_actual
                 or clean_actual in clean_expected
-            ):
-                return True
+            )
+
+            if match:
+                logger.debug(f"标题匹配成功: {actual_title[:50]}...")
+            else:
+                logger.debug(
+                    f"标题不匹配: 期望={expected_title[:50]}... 实际={actual_title[:50]}..."
+                )
+
+            return match
 
         except Exception as e:
-            print(f"  标题验证失败 (PMID:{pmid}): {e}")
+            logger.warning(f"标题验证失败 (PMID:{pmid}): {e}")
+            return False
 
-        return False
+    def get_article_info_by_pmid(self, pmid: str) -> dict | None:
+        """通过PMID获取完整的文章信息（从缓存或API）"""
+        if pmid in self.cache_pmid_info:
+            return self.cache_pmid_info[pmid]
 
-    def get_article_info_by_pmid(self, pmid: str) -> Optional[Dict]:
-        """通过PMID获取完整的文章信息（包括DOI）"""
         try:
             article = self.fetch.article_by_pmid(pmid)
             self.query_count += 1
 
-            return {
+            info = {
                 "pmid": article.pmid,
                 "doi": article.doi,
                 "title": article.title,
@@ -279,139 +231,255 @@ class PubMedLookup:
                 "authors": article.authors,
                 "abstract": getattr(article, "abstract", ""),
             }
+
+            self.cache_pmid_info[pmid] = info
+            return info
+
         except Exception as e:
-            print(f"  获取文章信息失败 (PMID:{pmid}): {e}")
+            logger.error(f"获取文章信息失败 (PMID:{pmid}): {e}")
             return None
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="使用metapub从BibTeX文件中查找并添加PubMed DOI和PMID"
-    )
-    parser.add_argument("input", type=str, help="输入的BibTeX文件路径")
-    parser.add_argument(
-        "-o", "--output", type=str, help="输出文件路径（默认覆盖原文件）"
-    )
-    parser.add_argument(
-        "--api-key",
-        type=str,
-        help="NCBI API密钥（提高速率限制，设置环境变量NCBI_API_KEY也可）",
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true", help="仅显示将进行的修改，不写入文件"
-    )
+def clean_bibtex_fields(entry: dict) -> dict:
+    """清理和标准化BibTeX字段"""
+    cleaned = {}
+    for key, value in entry.items():
+        # 移除多余的换行和空格
+        if isinstance(value, str):
+            value = " ".join(value.split())
+            # 移除字段值外层的花括号
+            value = value.strip("{}")
+        cleaned[key.lower()] = value
+    return cleaned
 
-    args = parser.parse_args()
+
+def enrich_bibtex_entry(
+    entry_dict: dict,
+    entry_key: str,
+    entry_type: str,
+    searcher: PubMedLookup,
+    force_update: bool = False,
+    dry_run: bool = False,
+) -> dict:
+    """丰富单个BibTeX条目"""
+    fields = clean_bibtex_fields(entry_dict)
+
+    # 检查是否需要处理
+    has_doi = "doi" in fields and fields["doi"]
+    has_pmid = "pmid" in fields and fields["pmid"]
+
+    if has_doi and has_pmid and not force_update:
+        logger.debug(f"跳过 {entry_key}: 已有DOI和PMID")
+        return fields
+
+    # 提取必要字段
+    title = fields.get("title", "")
+    journal = fields.get("journal", "")
+    year = fields.get("year", "")
+    volume = fields.get("volume", "")
+    pages = fields.get("pages", "")
+    author = fields.get("author", "")
+
+    if not title or not journal or not year:
+        logger.warning(f"{entry_key}: 缺少必要信息 (title/journal/year)，跳过")
+        return fields
+
+    logger.info(f"处理: {entry_key}")
+    logger.debug(f"  标题: {title[:80]}...")
+    logger.debug(f"  期刊: {journal}, {year}")
+
+    # 提取作者姓氏
+    author_last = None
+    if author:
+        first_author = author.split(" and ")[0]
+        name_parts = first_author.split()
+        if name_parts:
+            author_last = name_parts[-1].strip("{},.")
+            logger.debug(f"  第一作者: {author_last}")
+
+    # 提取起始页码
+    first_page = None
+    if pages:
+        if "--" in pages:
+            first_page = pages.split("--")[0]
+        elif "-" in pages:
+            first_page = pages.split("-")[0]
+        else:
+            first_page = pages
+        logger.debug(f"  起始页码: {first_page}")
+
+    # 查找PMID
+    if not has_pmid or force_update:
+        logger.info("  搜索PMID...")
+        pmid = searcher.search_pmid_by_citation(
+            title=title,
+            journal=journal,
+            year=year,
+            volume=volume,
+            first_page=first_page,
+            author=author_last,
+        )
+
+        if pmid and not dry_run:
+            fields["pmid"] = pmid
+            logger.success(f"  ✓ 找到PMID: {pmid}")
+        elif pmid:
+            logger.success(f"  ✓ 找到PMID: {pmid} (dry-run)")
+        else:
+            logger.warning("  ✗ 未找到PMID")
+    else:
+        pmid = fields.get("pmid")
+        logger.debug(f"  已有PMID: {pmid}")
+
+    # 获取DOI
+    if pmid and (not has_doi or force_update):
+        logger.info("  获取DOI...")
+        article_info = searcher.get_article_info_by_pmid(pmid)
+        if article_info and article_info.get("doi"):
+            doi = article_info["doi"]
+            if not dry_run:
+                fields["doi"] = doi
+            logger.success(f"  ✓ 找到DOI: {doi}")
+        else:
+            logger.warning("  ✗ 未找到DOI")
+
+    logger.debug(f"  当前API查询次数: {searcher.query_count}")
+    return fields
+
+
+@app.command()
+def enrich(
+    input_file: str = typer.Argument(..., help="输入的BibTeX文件路径", exists=True),
+    output_file: str | None = typer.Option(
+        None, "--output", "-o", help="输出文件路径（默认覆盖原文件）"
+    ),
+    api_key: str | None = typer.Option(
+        None, "--api-key", envvar="NCBI_API_KEY", help="NCBI API密钥"
+    ),
+    email: str | None = typer.Option(
+        None, "--email", envvar="NCBI_EMAIL", help="联系邮箱（NCBI建议提供）"
+    ),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="强制更新已有DOI/PMID的条目"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="仅显示将进行的修改，不写入文件"
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="显示详细日志"),
+):
+    """
+    从BibTeX文件中查找并添加PubMed DOI和PMID
+
+    示例:
+      bibtex-enrich references.bib
+      bibtex-enrich references.bib -o enriched.bib --api-key YOUR_KEY
+      bibtex-enrich references.bib --dry-run --verbose
+    """
+    # 设置日志级别
+    if verbose:
+        logger.remove()
+        logger.add(lambda msg: print(msg, end=""), level="DEBUG")
+        logger.add("bibtex_enrich_{time:YYYY-MM-DD}.log", level="DEBUG")
+    else:
+        logger.info("使用 --verbose 查看详细日志")
+
+    logger.info(f"开始处理文件: {input_file}")
 
     # 读取BibTeX文件
-    input_path = Path(args.input)
-    if not input_path.exists():
-        print(f"错误：文件 {input_path} 不存在")
-        return
+    input_path = Path(input_file)
+    try:
+        with open(input_path, "r", encoding="utf-8") as f:
+            bib_database = bibtexparser.load(
+                f, parser=BibTexParser(common_strings=True)
+            )
+    except Exception as e:
+        logger.error(f"读取BibTeX文件失败: {e}")
+        raise typer.Exit(code=1)
 
-    print(f"正在解析BibTeX文件: {input_path}")
-    entries = BibTeXParser.parse_file(input_path)
-    print(f"找到 {len(entries)} 个条目\n")
+    entries = bib_database.entries
+    logger.info(f"找到 {len(entries)} 个BibTeX条目")
 
     # 初始化PubMed查找器
-    searcher = PubMedLookup(
-        api_key=args.api_key,
-    )
+    searcher = PubMedLookup(api_key=api_key, email=email)
 
     # 处理每个条目
-    stats = {"total": len(entries), "found_pmid": 0, "found_doi": 0, "failed": 0}
+    stats = {
+        "total": len(entries),
+        "found_pmid": 0,
+        "found_doi": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
 
     for i, entry in enumerate(entries, 1):
-        print(f"[{i}/{len(entries)}] 处理: {entry.key}")
+        logger.info(f"\n[{i}/{len(entries)}] 处理条目: {entry.get('ID', 'unknown')}")
 
-        # 检查是否已有DOI或PMID
-        has_doi = "doi" in entry.fields
-        has_pmid = "pmid" in entry.fields
+        # 保存原始的ID和ENTRYTYPE
+        entry_key = entry.get("ID", f"entry_{i}")
+        entry_type = entry.get("ENTRYTYPE", "article")
 
-        # 提取字段
-        title = entry.fields.get("title", "")
-        journal = entry.fields.get("journal", "")
-        year = entry.fields.get("year", "")
-        volume = entry.fields.get("volume", "")
-        pages = entry.fields.get("pages", "")
-        author = entry.fields.get("author", "")
+        # 丰富条目
+        original_has_pmid = "pmid" in entry
+        original_has_doi = "doi" in entry
 
-        if not title or not journal or not year:
-            print("  ⚠ 缺少必要信息 (title/journal/year)，跳过")
-            stats["failed"] += 1
-            continue
+        enriched_fields = enrich_bibtex_entry(
+            entry, entry_key, entry_type, searcher, force, dry_run
+        )
 
-        print(f"  标题: {title[:60]}..." if len(title) > 60 else f"  标题: {title}")
-        print(f"  期刊: {journal}, {year}")
+        # 更新统计
+        if not original_has_pmid and "pmid" in enriched_fields:
+            stats["found_pmid"] += 1
+        if not original_has_doi and "doi" in enriched_fields:
+            stats["found_doi"] += 1
 
-        # 提取作者姓氏（用于citation搜索）
-        author_last = None
-        if author:
-            # 提取第一个作者的姓氏（如 "B. M. Shields" -> "Shields"）
-            first_author = author.split(" and ")[0]
-            name_parts = first_author.split()
-            if name_parts:
-                author_last = name_parts[-1].strip("{},.")
-
-        # 提取起始页码
-        first_page = None
-        if pages and "--" in pages:
-            first_page = pages.split("--")[0]
-        elif pages:
-            first_page = pages
-
-        # 搜索PMID
-        pmid = None
-        if not has_pmid:
-            print("  正在搜索PMID...")
-            pmid = searcher.search_pmid_by_citation(
-                title=title,
-                journal=journal,
-                year=year,
-                volume=volume,
-                first_page=first_page,
-                author=author_last,
-            )
-
-            if pmid:
-                print(f"  ✓ 找到PMID: {pmid}")
-                entry.fields["pmid"] = pmid
-                stats["found_pmid"] += 1
-            else:
-                print("  ✗ 未找到PMID")
-        else:
-            pmid = entry.fields.get("pmid")
-
-        # 获取DOI
-        if pmid and not has_doi:
-            print("  正在获取DOI...")
-            article_info = searcher.get_article_info_by_pmid(pmid)
-            if article_info and article_info.get("doi"):
-                doi = article_info["doi"]
-                print(f"  ✓ 找到DOI: {doi}")
-                entry.fields["doi"] = doi
-                stats["found_doi"] += 1
-            else:
-                print("  ✗ 未找到DOI")
-
-        print(f"  当前查询次数: {searcher.query_count}\n")
+        # 更新原始条目（跳过特殊字段）
+        for key, value in enriched_fields.items():
+            if key not in ["id", "entrytype"]:
+                entry[key] = value
 
     # 输出统计信息
-    print("=" * 50)
-    print("统计结果:")
-    print(f"  总条目数: {stats['total']}")
-    print(f"  找到PMID: {stats['found_pmid']}")
-    print(f"  找到DOI: {stats['found_doi']}")
-    print(f"  失败: {stats['failed']}")
-    print(f"  总API查询次数: {searcher.query_count}")
+    logger.info("\n" + "=" * 50)
+    logger.info("统计结果:")
+    logger.info(f"  总条目数: {stats['total']}")
+    logger.info(f"  新增PMID: {stats['found_pmid']}")
+    logger.info(f"  新增DOI: {stats['found_doi']}")
+    logger.info(f"  失败/跳过: {stats['failed']}")
+    logger.info(f"  总API查询次数: {searcher.query_count}")
 
     # 写回文件
-    if not args.dry_run:
-        output_path = Path(args.output) if args.output else input_path
-        BibTeXParser.write_file(output_path, entries)
-        print(f"\n✓ 结果已保存到: {output_path}")
+    if not dry_run:
+        output_path = Path(output_file) if output_file else input_path
+
+        # 创建备份（如果覆盖原文件）
+        if output_path == input_path and input_path.exists():
+            backup_path = input_path.with_suffix(
+                f".backup{datetime.now():%Y%m%d_%H%M%S}.bib"
+            )
+            import shutil
+
+            shutil.copy2(input_path, backup_path)
+            logger.info(f"已创建备份: {backup_path}")
+
+        try:
+            with open(output_path, "w", encoding="utf-8") as f:
+                bibtexparser.dump(bib_database, f)
+            logger.success(f"✓ 结果已保存到: {output_path}")
+        except Exception as e:
+            logger.error(f"保存文件失败: {e}")
+            raise typer.Exit(code=1)
     else:
-        print("\n✓ Dry run完成，未写入文件")
+        logger.info("\n✓ Dry run完成，未写入文件")
+
+
+@app.command()
+def version():
+    """显示版本信息"""
+    typer.echo("BibTeX PubMed Enricher v2.0.0")
+    typer.echo("使用 metapub, bibtexparser, typer, loguru")
+
+
+def main():
+    app()
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "bibtexparser>=1.4.4",
     "loguru>=0.7.3",
-    "scidownl>=1.0.2",
+    "metapub>=0.7.4",
     "typer>=0.26.3",
 ]
 
