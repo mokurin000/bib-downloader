@@ -1,6 +1,6 @@
 import typer
 import asyncio
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Page
 import bibtexparser
 from loguru import logger
 from pathlib import Path
@@ -15,10 +15,9 @@ log_path = Path("logs")
 log_path.mkdir(exist_ok=True)
 logger.add(f"logs/sci-downloader-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log")
 
-DEFAULT_SCI_HUB_URL = "https://sci-hub.box/"
+DEFAULT_SCI_HUB_URL = "https://sci-hub.box"
 DOWNLOAD_LOCATOR = "div.download > a"
 POLL_INTERVAL_MS = 200
-MAX_POLL_ATTEMPTS = 50  # 10 seconds max (50 * 200ms)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
 
 
@@ -27,44 +26,45 @@ def normalize_filename(doi: str) -> str:
     return doi.replace("/", "_") + ".pdf"
 
 
-async def get_download_link(sci_hub_url: str, doi: str) -> Optional[str]:
-    """Navigate to Sci-Hub and extract download link after DDoS-Guard"""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        page = await browser.new_page(user_agent=USER_AGENT)
+async def get_download_link(page: Page, sci_hub_url: str, doi: str) -> Optional[str]:
+    """Navigate to Sci-Hub and extract download link using existing page"""
+    full_url = f"{sci_hub_url}/{doi}"
+    logger.info(f"Accessing {full_url}")
 
-        full_url = f"{sci_hub_url}/{doi}"
-        logger.info(f"Accessing {full_url}")
+    await page.goto(full_url)
 
-        await page.goto(full_url)
+    # Wait for DDoS-Guard check and download link to appear (no timeout)
+    locator = page.locator(DOWNLOAD_LOCATOR)
+    missing_locator = page.locator("block-rounded.message")
+    download_link = None
+    attempt = 0
+    while True:
+        await asyncio.sleep(POLL_INTERVAL_MS / 1000)
+        attempt += 1
 
-        # Wait for DDoS-Guard check and download link to appear
-        locator = page.locator(DOWNLOAD_LOCATOR)
-        download_link = None
-        for attempt in range(MAX_POLL_ATTEMPTS):
-            await asyncio.sleep(POLL_INTERVAL_MS / 1000)
+        # Check if download element exists
+        element = await locator.all()
+        if element:
+            href = await element.pop().get_attribute("href")
+            download_link = href
+            logger.success(f"Found download link for {doi} after {attempt} attempts")
+            break
 
-            # Check if download element exists
-            element = await locator.all()
-            if element:
-                href = await element.pop().get_attribute("href")
-                download_link = href
-                logger.success(f"Found download link for {doi}")
-                break
+        if await missing_locator.all():
+            logger.error("Missing article on Sci-Hub, skipping")
+            break
 
-            logger.debug(f"Waiting for download link... attempt {attempt + 1}")
+        logger.debug(f"Waiting for download link... attempt {attempt}")
 
-        await browser.close()
+    if not download_link:
+        logger.error(f"Failed to get download link for {doi}")
+        return None
 
-        if not download_link:
-            logger.error(f"Failed to get download link for {doi}")
-            return None
+    # Handle relative URLs
+    if download_link.startswith("/"):
+        download_link = sci_hub_url.rstrip("/") + download_link
 
-        # Handle relative URLs
-        if download_link.startswith("/"):
-            download_link = sci_hub_url.rstrip("/") + download_link
-
-        return download_link
+    return download_link
 
 
 def parse_bib_file(bib_path: Path) -> List[str]:
@@ -113,6 +113,12 @@ def download(
         Path("downloads"), help="Directory to check for existing PDFs"
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+    delay: float = typer.Option(
+        2.0, "--delay", "-d", help="Delay in seconds between requests to avoid IP ban"
+    ),
+    headless: bool = typer.Option(
+        False, "--headless", help="Run browser in headless mode"
+    ),
 ):
     """
     Download PDFs from Sci-Hub using DOIs from BibTeX file.
@@ -132,6 +138,8 @@ def download(
     logger.info(f"Starting PDF download process from {bib_file}")
     logger.info(f"Sci-Hub URL: {sci_hub_url}")
     logger.info(f"Downloads directory: {pdf_dir.absolute()}")
+    logger.info(f"Delay between requests: {delay} seconds")
+    logger.info(f"Browser headless mode: {headless}")
 
     # Parse DOIs from bib file
     dois = parse_bib_file(bib_file)
@@ -140,25 +148,45 @@ def download(
         logger.warning("No DOIs found in bib file")
         raise typer.Exit(code=0)
 
-    # Asynchronously get download links
+    # Asynchronously get download links one by one with delay, reusing browser
     async def main():
-        tasks = [get_download_link(sci_hub_url, doi) for doi in dois]
-        results = await asyncio.gather(*tasks)
-
-        # Prepare downloads list
         downloads = []
-        for doi, url in zip(dois, results):
-            filename = normalize_filename(doi)
-            filepath = pdf_dir / filename
 
-            if skip_existing and filepath.exists():
-                logger.info(f"Skipping {filename} - already exists in {pdf_dir}")
-                continue
+        # Launch browser once
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=headless, channel="chrome")
+            page = await browser.new_page(user_agent=USER_AGENT)
 
-            if url:
-                downloads.append((url, filename))
-            else:
-                logger.error(f"No download link for {doi}")
+            try:
+                for idx, doi in enumerate(dois):
+                    filename = normalize_filename(doi)
+                    filepath = pdf_dir / filename
+
+                    if skip_existing and filepath.exists():
+                        logger.info(
+                            f"Skipping {filename} - already exists in {pdf_dir}"
+                        )
+                        continue
+
+                    # Add delay between requests (except for first one)
+                    if idx > 0:
+                        logger.info(f"Waiting {delay} seconds before next request...")
+                        await asyncio.sleep(delay)
+
+                    logger.info(f"Processing DOI {idx + 1}/{len(dois)}: {doi}")
+
+                    # Create a new page for each DOI to keep state clean
+                    # Or reuse the same page - reusing is more efficient
+                    url = await get_download_link(page, sci_hub_url, doi)
+
+                    if url:
+                        downloads.append((url, filename))
+                        logger.success(f"Got download link for {doi}")
+                    else:
+                        logger.error(f"No download link for {doi}")
+
+            finally:
+                await browser.close()
 
         # Write aria2 input to stdout
         if downloads:
