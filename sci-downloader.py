@@ -28,6 +28,31 @@ def normalize_filename(doi: str) -> str:
     return doi.replace("/", "_") + ".pdf"
 
 
+async def download_pdf(page: Page, url: str, filepath: Path) -> bool:
+    """Download PDF from URL using browser's API request context and save to file"""
+    try:
+        logger.info(f"Downloading PDF from {url}")
+        response = await page.request.get(url)
+        if not response.ok:
+            logger.error(
+                f"Failed to download PDF: HTTP {response.status} {response.status_text}"
+            )
+            return False
+
+        body = await response.body()
+        if not body:
+            logger.error("Downloaded empty response body")
+            return False
+
+        filepath.write_bytes(body)
+        await response.dispose()
+        logger.success(f"Saved PDF ({len(body)} bytes) to {filepath.name}")
+        return True
+    except Exception as e:
+        logger.error(f"Error downloading PDF: {e}")
+        return False
+
+
 async def get_download_link(page: Page, sci_hub_url: str, doi: str) -> Optional[str]:
     """Navigate to Sci-Hub and extract download link using existing page"""
     full_url = f"{sci_hub_url}/{doi}"
@@ -99,31 +124,9 @@ def parse_bib_file(bib_path: Path) -> List[str]:
         raise typer.Exit(code=1)
 
 
-def write_curl_script_to_file(downloads: List[tuple], pdf_dir: Path, output_file: Path):
-    """Write curl script to file (without shebang)"""
-    if not downloads:
-        logger.warning("No downloads to write")
-        return
-
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write("curl -L \\\n")
-
-        for i, (url, filename) in enumerate(downloads):
-            path = pdf_dir / filename
-            if i == len(downloads) - 1:  # Last line without backslash
-                f.write(f"   '{url}' -o '{path}'\n")
-            else:
-                f.write(f"   '{url}' -o '{path}' \\\n")
-
-    logger.success(f"Curl script written to: {output_file}")
-
-
 @app.command()
 def download(
     bib_file: Path = typer.Argument(..., exists=True, help="BibTeX file path"),
-    output_script: Path = typer.Option(
-        Path("download.sh"), "--output", "-o", help="Output shell script path"
-    ),
     sci_hub_url: str = typer.Option(DEFAULT_SCI_HUB_URL, help="Sci-Hub base URL"),
     skip_existing: bool = typer.Option(True, help="Skip if PDF already exists"),
     pdf_dir: Path = typer.Option(
@@ -139,11 +142,10 @@ def download(
 ):
     """
     Download PDFs from Sci-Hub using DOIs from BibTeX file.
-    Generates a curl script file.
+    PDFs are downloaded directly via the browser's network context.
 
     Usage:
         python script.py download references.bib
-        python script.py download references.bib --output my_download.sh
     """
     if verbose:
         logger.add(sys.stderr, level="DEBUG")
@@ -153,7 +155,6 @@ def download(
     logger.info(f"Starting PDF download process from {bib_file}")
     logger.info(f"Sci-Hub URL: {sci_hub_url}")
     logger.info(f"Downloads directory: {pdf_dir.absolute()}")
-    logger.info(f"Output script: {output_script.absolute()}")
     logger.info(f"Delay between requests: {delay} seconds")
     logger.info(f"Browser headless mode: {headless}")
 
@@ -164,9 +165,9 @@ def download(
         logger.warning("No DOIs found in bib file")
         raise typer.Exit(code=0)
 
-    # Asynchronously get download links one by one with delay, reusing browser
+    # Asynchronously process DOIs one by one with delay, reusing browser
     async def main():
-        downloads = []
+        downloaded_count = 0
 
         # Launch browser once
         async with async_playwright() as p:
@@ -194,20 +195,22 @@ def download(
                     url = await get_download_link(page, sci_hub_url, doi)
 
                     if url:
-                        downloads.append((url, filename))
-                        logger.success(f"Got download link for {doi}")
+                        success = await download_pdf(page, url, filepath)
+                        if success:
+                            downloaded_count += 1
                     else:
                         logger.error(f"No download link for {doi}")
 
             finally:
                 await browser.close()
 
-        # Write curl script to file
-        if downloads:
-            write_curl_script_to_file(downloads, pdf_dir, output_script)
-            logger.info(f"To download, run: bash {output_script}")
+        # Summary
+        if downloaded_count:
+            logger.success(
+                f"Downloaded {downloaded_count} PDF(s) to {pdf_dir.absolute()}"
+            )
         else:
-            logger.warning("No download links found - nothing to output")
+            logger.warning("No PDFs were downloaded")
 
     # Run async function
     asyncio.run(main())
