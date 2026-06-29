@@ -1,5 +1,6 @@
 import sys
 import asyncio
+from urllib.parse import urlparse
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
@@ -17,7 +18,7 @@ log_path.mkdir(exist_ok=True)
 logger.add(f"logs/sci-downloader-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log")
 
 DEFAULT_SCI_HUB_URL = "https://sci-hub.box"
-DOWNLOAD_LOCATOR = "div.download > a"
+DOWNLOAD_LOCATOR = "div.pdf > iframe, div.pdf > object"
 POLL_INTERVAL_MS = 200
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
 
@@ -46,8 +47,9 @@ async def get_download_link(page: Page, sci_hub_url: str, doi: str) -> Optional[
         # Check if download element exists
         element = await locator.all()
         if element:
-            href = await element.pop().get_attribute("href")
-            download_link = href
+            pdf = element.pop()
+            src = await pdf.get_attribute("src") or await pdf.get_attribute("data")
+            download_link = src
             logger.success(f"Found download link for {doi} after {attempt} attempts")
             break
 
@@ -63,7 +65,9 @@ async def get_download_link(page: Page, sci_hub_url: str, doi: str) -> Optional[
 
     # Handle relative URLs
     if download_link.startswith("/"):
-        download_link = sci_hub_url.rstrip("/") + download_link
+        # Handle sci media
+        domain = urlparse(page.url).hostname
+        download_link = f"https://{domain}{download_link}"
 
     return download_link
 
