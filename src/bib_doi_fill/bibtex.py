@@ -1,5 +1,3 @@
-import re
-
 from loguru import logger
 
 from .pubmed import PubMedLookup
