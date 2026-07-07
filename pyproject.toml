@@ -1,7 +1,7 @@
 [project]
-name = "paper-search"
-version = "0.1.0"
-description = "Add your description here"
+name = "bib-downloader"
+version = "2.1.0"
+description = "A collection of tools for downloading academic papers and enriching BibTeX metadata"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -12,4 +12,8 @@ dependencies = [
     "typer>=0.26.3",
 ]
 
-[dependency-groups]
+[project.scripts]
+bibtex-enrich = "bib_doi_fill.cli:entry_point"
+
+[tool.uv]
+package = true

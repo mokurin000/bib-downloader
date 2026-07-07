@@ -1,4 +1,4 @@
-# Paper Search
+# Bib Downloader
 
 A collection of tools for downloading academic papers and enriching BibTeX metadata.
 
@@ -51,25 +51,49 @@ uv run sci-downloader.py references.bib --headless
 uv run sci-downloader.py references.bib --pdf-dir my_papers
 ```
 
-### `bib_doi_fill.py` — Enrich BibTeX with DOIs & PMIDs
+### `bib_doi_fill` — Enrich BibTeX with DOIs & PMIDs
 
 Looks up DOIs and PMIDs from PubMed for BibTeX entries missing this information.
+Refactored into a modular package (`bib_doi_fill/`) — no subcommand needed.
 
 #### Usage
 
 ```bash
-uv run bib_doi_fill.py input.bib -o enriched.bib
+python -m bib_doi_fill input.bib --dry-run
+# Or via installed entry point:
+bibtex-enrich input.bib
 ```
 
 #### Options
 
 | Flag               | Default    | Description                                            |
 | ------------------ | ---------- | ------------------------------------------------------ |
-| `bib_file`         | (required) | Path input BibTeX file                                 |
-| `--output` / `-o`  | (required) | Path for output enriched BibTeX file                   |
+| `input_file`       | (required) | Path to input BibTeX file                              |
+| `--output` / `-o`  | —          | Output file path (defaults to overwriting input file)  |
 | `--api-key`        | —          | NCBI API key (increases rate limit from 3 to 10 req/s) |
 | `--email`          | —          | Contact email (recommended by NCBI)                    |
+| `--force` / `-f`   | `False`    | Force re-fetch for entries that already have DOI/PMID  |
+| `--dry-run`        | `False`    | Show what would be changed without writing             |
 | `--verbose` / `-v` | `False`    | Enable debug logging                                   |
+| `--version`        | —          | Show version information and exit                      |
+
+#### DOI-first enrichment
+
+When a BibTeX entry already has a DOI but no PMID, the tool now uses
+`PubMedFetcher.article_by_doi(doi)` to resolve the PMID directly — skipping
+the slower citation-based search. This applies automatically.
+
+#### Module structure
+
+```
+bib_doi_fill.py        Thin wrapper (backwards compatible)
+bib_doi_fill/
+  __init__.py          Version info
+  __main__.py          python -m support
+  cli.py               Typer CLI (callback pattern, no subcommand)
+  pubmed.py            PubMedLookup class (+ article_by_doi support)
+  bibtex.py            BibTeX field cleaning & enrichment logic
+```
 
 ## Installation
 
