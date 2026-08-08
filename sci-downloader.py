@@ -9,6 +9,7 @@ import typer
 from playwright.async_api import async_playwright, Page
 import bibtexparser
 from loguru import logger
+from httpx2 import AsyncClient
 
 app = typer.Typer()
 
@@ -32,20 +33,24 @@ async def download_pdf(page: Page, url: str, filepath: Path) -> bool:
     """Download PDF from URL using browser's API request context and save to file"""
     try:
         logger.info(f"Downloading PDF from {url}")
-        response = await page.request.get(url)
-        if not response.ok:
+        async with AsyncClient() as client:
+            response = await client.get(
+                url,
+                headers={"user-agent": USER_AGENT},
+                timeout=30.0,
+            )
+        if not response.status_code == 200:
             logger.error(
                 f"Failed to download PDF: HTTP {response.status} {response.status_text}"
             )
             return False
 
-        body = await response.body()
+        body = response.read()
         if not body:
             logger.error("Downloaded empty response body")
             return False
 
         filepath.write_bytes(body)
-        await response.dispose()
         logger.success(f"Saved PDF ({len(body)} bytes) to {filepath.name}")
         return True
     except Exception as e:
