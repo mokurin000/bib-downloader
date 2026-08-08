@@ -62,7 +62,7 @@ async def get_download_link(page: Page, sci_hub_url: str, doi: str) -> Optional[
 
     # Wait for DDoS-Guard check and download link to appear (no timeout)
     locator = page.locator(DOWNLOAD_LOCATOR)
-    missing_locator = page.locator("block-rounded.message")
+    missing_locator = page.locator("block-rounded.message, div.notfound")
     download_link = None
     attempt = 0
     while True:
