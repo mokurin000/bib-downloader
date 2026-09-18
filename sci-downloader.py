@@ -38,6 +38,7 @@ async def download_pdf(page: Page, url: str, filepath: Path) -> bool:
                 url,
                 headers={"user-agent": USER_AGENT},
                 timeout=30.0,
+                follow_redirects=True,
             )
         if not response.status_code == 200:
             logger.error(
@@ -94,7 +95,9 @@ async def get_download_link(page: Page, sci_hub_url: str, doi: str) -> Optional[
         return None
 
     # Handle relative URLs
-    if download_link.startswith("/"):
+    if download_link.startswith("//"):
+        download_link = f"https:{download_link}"
+    elif download_link.startswith("/"):
         # Handle sci media
         domain = urlparse(page.url).hostname
         download_link = f"https://{domain}{download_link}"
